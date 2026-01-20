@@ -1,120 +1,35 @@
-<!-- webllm-test.html — Minimal WebLLM test (cdn) -->
-<!doctype html>
+<!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8" />
-  <title>WebLLM Minimal Test</title>
-  <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 18px; max-width: 720px; }
-    #log { white-space: pre-wrap; border: 1px solid #ddd; padding: 12px; min-height: 120px; }
-    button { padding: 8px 12px; margin-top: 8px; }
-  </style>
-</head>
-<body>
-  <h2>WebLLM minimal test</h2>
-  <div>Model load status: <span id="status">idle</span></div>
-  <div>Progress: <span id="progress">0%</span></div>
-  <div style="margin-top:8px;">
-    <button id="startBtn">Load model & run test</button>
-  </div>
-  <h3>Output</h3>
-  <div id="log"></div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebLLM Test</title>
+    <link rel="stylesheet" href="./webllm-test.css" />
+  </head>
+  <body>
+    <p>
+      Step 1: Initialize WebLLM and Download Model
+    </p>
+    <div class="download-container">
+      <select id="model-selection"></select>
+      <button id="download">
+        Download
+      </button>
+    </div>
+    <p id="download-status" class="hidden"></p>
 
-  <script type="module">
-    // CDN import (works in modern browsers). This uses the esm.run CDN per the WebLLM docs.
-    import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+    <p>
+      Step 2: Chat
+    </p>
+    <div class="chat-container">
+      <div id="chat-box" class="chat-box"></div>
+      <div id="chat-stats" class="chat-stats hidden"></div>
+      <div class="chat-input-container">
+        <input type="text" id="user-input" placeholder="Type a message..." />
+        <button id="send" disabled>Send</button>
+      </div>
+    </div>
 
-    // after the import: import * as webllm from "...";
-    // Print the IDs available in the prebuilt app config
-    console.log("WebLLM prebuilt model_list:", webllm.prebuiltAppConfig.model_list);
-
-    const statusEl = document.getElementById("status");
-    const progressEl = document.getElementById("progress");
-    const logEl = document.getElementById("log");
-    const startBtn = document.getElementById("startBtn");
-
-    // show them in UI too (optional)
-    const available = webllm.prebuiltAppConfig.model_list.map(m => m.id);
-    statusEl.textContent = "available models: " + available.join(", ");
-
-    const SELECTED_MODEL = available.length > 0 ? available[0] : null;
-    if (!SELECTED_MODEL) {
-    throw new Error("No prebuilt models found in webllm.prebuiltAppConfig.model_list");
-    }
-
-    // then use SELECTED_MODEL when creating the engine:
-    const engine = await webllm.CreateMLCEngine(SELECTED_MODEL, { initProgressCallback });
-
-    // Pick a model name that exists in the public model registry.
-    // You can change this to a smaller model if you have bandwidth limits.
-    //const SELECTED_MODEL = "Llama-3.1-8B-Instruct"; // first-run download may be large
-
-    function log(...args) {
-      console.log(...args);
-      logEl.textContent += args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" ") + "\n";
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-
-    startBtn.addEventListener("click", async () => {
-      startBtn.disabled = true;
-      statusEl.textContent = "creating engine…";
-      try {
-        // init progress callback receives numbers 0..1 (or more descriptive progress objects)
-        const initProgressCallback = (p) => {
-          const pct = typeof p === "number" ? Math.round(p * 100) : JSON.stringify(p);
-          statusEl.textContent = "loading model";
-          progressEl.textContent = pct + (typeof p === "number" ? "%" : "");
-        };
-
-        // Create engine + load model in one step (async)
-        statusEl.textContent = "creating MLCEngine";
-        const engine = await webllm.CreateMLCEngine(SELECTED_MODEL, { initProgressCallback });
-
-        statusEl.textContent = "model ready";
-        progressEl.textContent = "100%";
-        log("Model loaded:", SELECTED_MODEL);
-
-        // Example: streaming chat completion
-        const messages = [
-          { role: "system", content: "You are a concise assistant for testing." },
-          { role: "user", content: "Say one short sentence describing an ice-breaking NPC robot." }
-        ];
-
-        log("Starting streaming completion…");
-        // stream: true returns an async generator (chunks)
-        const chunks = await engine.chat.completions.create({
-          messages,
-          temperature: 0.8,
-          stream: true,
-          stream_options: { include_usage: true }
-        });
-
-        let reply = "";
-        for await (const chunk of chunks) {
-          // chunk.choices[0].delta.content holds partial tokens
-          const delta = chunk.choices?.[0]?.delta?.content || "";
-          reply += delta;
-          // live update to UI
-          statusEl.textContent = "decoding";
-          logEl.textContent = reply;
-          // when last chunk has usage, it'll be in chunk.usage
-          if (chunk.usage) {
-            log("\nUSAGE:", chunk.usage);
-          }
-        }
-
-        // engine.getMessage() returns the full final message object
-        const full = await engine.getMessage();
-        log("\nFinal message object:", full);
-        statusEl.textContent = "done";
-        startBtn.disabled = false;
-
-      } catch (err) {
-        statusEl.textContent = "error";
-        log("Error:", err && (err.stack || err.message || String(err)));
-        startBtn.disabled = false;
-      }
-    });
-  </script>
-</body>
+    <script src="./webllm-test.js" type="module"></script>
+  </body>
 </html>
