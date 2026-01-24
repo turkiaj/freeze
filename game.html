@@ -117,10 +117,10 @@
 
   <script type="module">
  
-     // WebLLM for operating LLMs in browser
+  // WebLLM for operating LLMs in browser
 	import * as webllm from 'https://esm.run/@mlc-ai/web-llm';
 
-	// Create the MLCEngine instance
+  // Create the MLCEngine instance
 	const engine = new webllm.MLCEngine();
 	const selectedModel = "Llama-3-8B-Instruct-q4f32_1-MLC-1k";
 
@@ -129,35 +129,28 @@
 		temperature: 0.8,
 		top_p: 0.8
 	}).then(() => {
-		console.log('LLM model loaded successfully');
+		console.log('[LLM] Model loaded successfully');
 	}).catch((err) => {
-		console.error('Failed to load LLM model:', err);
+		console.error('[LLM] Failed to load model:', err);
 	});
   
-    document.addEventListener('DOMContentLoaded', async function() {
-	  console.log("DOM fully loaded.");
-	  
-	  // wait for the model to be ready
-	  await loadModelPromise;
-      console.log("AI loaded — ready to drive the robots!");
+  document.addEventListener('DOMContentLoaded', async function() {
+	  // Model loads in the background; game starts immediately with procedural AI
+	  console.log('Game initialized and ready to play');
 
       // ----- GAME CONSTANTS -----
       const TILE_SIZE = 25;
       const GRID_WIDTH = 22;
       const GRID_HEIGHT = 22;
       const EMPTY = 0, WALL = 1, PLAYER = 2, ROBOT = 3, ICE = 4;
+      const playerIsAI = false;  // Set to true to have LLM control the player
       
       // Configuration: player at top-left; robots in three other corners; maze of ice blocks.
       const ROBOT_COUNT = 3;
       const ICE_COUNT = 100;
       const FRICTION_DELAY = 150; // Delay before sliding begins
-
-	  // Time required to push an ice block before it slides (milliseconds)
-	  const PUSH_THRESHOLD = 300;
-	  let pushTimers = {};  // To track how long a player is pushing in a direction
-      
-      // For future AI control of the player.
-      let playerIsAI = false;
+      const PUSH_THRESHOLD = 300; // Time required to push before ice slides
+      let pushTimers = {}; // Track push timers per direction
       
       // ----- GAME VARIABLES -----
       let grid = [];
@@ -328,7 +321,6 @@
       // ----- initGame() -----
       // Sets up the game board: grid, walls, player, robots, and ice blocks.
       function initGame() {
-        console.log("Initializing game...");
         grid = Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(EMPTY));
         // Build walls around edges.
         for (let x = 0; x < GRID_WIDTH; x++) {
@@ -461,26 +453,26 @@
 	  return { path: path, type: "slide" };
 	}
 	  
-      // ----- Animate Slide -----
-      function animateSlide(path, slideResult, callback) {
-        let i = 0;
-        function step() {
-          if (i < path.length) {
-            let pos = path[i];
-            if (i > 0) {
-              let prev = path[i - 1];
-              if (grid[prev.y][prev.x] === ICE) grid[prev.y][prev.x] = EMPTY;
-            }
-            grid[pos.y][pos.x] = ICE;
-            render();
-            i++;
-            setTimeout(step, 50);
-          } else {
-            callback(slideResult);
-          }
+  // ----- Animate Slide -----
+  function animateSlide(path, slideResult, callback) {
+    let i = 0;
+    function step() {
+      if (i < path.length) {
+        let pos = path[i];
+        if (i > 0) {
+          let prev = path[i - 1];
+          if (grid[prev.y][prev.x] === ICE) grid[prev.y][prev.x] = EMPTY;
         }
-        step();
+        grid[pos.y][pos.x] = ICE;
+        render();
+        i++;
+        setTimeout(step, 50);
+      } else {
+        callback(slideResult);
       }
+    }
+    step();
+  }
 
 	// ----- Slide Ice with Friction Delay -----
 	function slideIceDelayed(x, y, dx, dy) {
@@ -511,86 +503,86 @@
 	  }, FRICTION_DELAY);
 	  return computeSlidePath(x, y, dx, dy);
 	}
-      // ----- Modular Player Action -----
-      function playerAct(direction) {
-        let dx = 0, dy = 0;
-        switch(direction) {
-          case "UP": dy = -1; break;
-          case "DOWN": dy = 1; break;
-          case "LEFT": dx = -1; break;
-          case "RIGHT": dx = 1; break;
-          default: return false;
-        }
-        return movePlayer(dx, dy);
+
+    // ----- Modular Player Action -----
+    function playerAct(direction) {
+      let dx = 0, dy = 0;
+      switch(direction) {
+        case "UP": dy = -1; break;
+        case "DOWN": dy = 1; break;
+        case "LEFT": dx = -1; break;
+        case "RIGHT": dx = 1; break;
+        default: return false;
       }
+      return movePlayer(dx, dy);
+    }
 
-      // ----- PLAYER MOVEMENT -----
-		function movePlayer(dx, dy) {
-			const newX = player.x + dx;
-			const newY = player.y + dy;
+    // ----- PLAYER MOVEMENT -----
+  function movePlayer(dx, dy) {
+    const newX = player.x + dx;
+    const newY = player.y + dy;
 
-			if (newX < 0 || newX >= GRID_WIDTH || newY < 0 || newY >= GRID_HEIGHT) {
-				return false;
-			}
+    if (newX < 0 || newX >= GRID_WIDTH || newY < 0 || newY >= GRID_HEIGHT) {
+      return false;
+    }
 
-			if (grid[newY][newX] === EMPTY) {
-				grid[player.y][player.x] = EMPTY;
-				player.x = newX;
-				player.y = newY;
-				grid[player.y][player.x] = PLAYER;
-				return true;
-			} else if (grid[newY][newX] === ICE) {
-				// Unique key for push tracking
-				let pushKey = `${newX},${newY},${dx},${dy}`;
+    if (grid[newY][newX] === EMPTY) {
+      grid[player.y][player.x] = EMPTY;
+      player.x = newX;
+      player.y = newY;
+      grid[player.y][player.x] = PLAYER;
+      return true;
+    } else if (grid[newY][newX] === ICE) {
+      // Unique key for push tracking
+      let pushKey = `${newX},${newY},${dx},${dy}`;
 
-				// If this is a new push, start a timer
-				if (!pushTimers[pushKey]) {
-					pushTimers[pushKey] = setTimeout(() => {
-						slideIceDelayed(newX, newY, dx, dy);
-						delete pushTimers[pushKey];  // Clear after execution
-					}, PUSH_THRESHOLD);
-				}
-				return true;
-			}
+      // If this is a new push, start a timer
+      if (!pushTimers[pushKey]) {
+        pushTimers[pushKey] = setTimeout(() => {
+          slideIceDelayed(newX, newY, dx, dy);
+          delete pushTimers[pushKey];  // Clear after execution
+        }, PUSH_THRESHOLD);
+      }
+      return true;
+    }
 
-			return false;
-		}
+    return false;
+  }
 
-		// Cancel push timers if the player moves away or stops pushing
-		function cancelPushTimers() {
-			for (let key in pushTimers) {
-				clearTimeout(pushTimers[key]);
-			}
-			pushTimers = {};
-		}
+  // Cancel push timers if the player moves away or stops pushing
+  function cancelPushTimers() {
+    for (let key in pushTimers) {
+      clearTimeout(pushTimers[key]);
+    }
+    pushTimers = {};
+  }
 	  	  
-      // ----- ROBOT MOVEMENT -----
-      function tryMoveRobot(robot, dx, dy) {
-        const newX = robot.x + dx;
-        const newY = robot.y + dy;
-        if (newX < 0 || newX >= GRID_WIDTH || newY < 0 || newY >= GRID_HEIGHT) {
-          return false;
-        }
-        if (grid[newY][newX] === EMPTY) {
-          grid[robot.y][robot.x] = EMPTY;
-          robot.x = newX;
-          robot.y = newY;
-          grid[newY][newX] = ROBOT;
-          return true;
-        } else if (grid[newY][newX] === PLAYER) {
-          addLog("Robot collided with player at (" + newX + "," + newY + ").");
-          if (gameRunning) playerCaught();
-          return true;
-        }
+    // ----- ROBOT MOVEMENT -----
+    function tryMoveRobot(robot, dx, dy) {
+      const newX = robot.x + dx;
+      const newY = robot.y + dy;
+      if (newX < 0 || newX >= GRID_WIDTH || newY < 0 || newY >= GRID_HEIGHT) {
         return false;
       }
+      if (grid[newY][newX] === EMPTY) {
+        grid[robot.y][robot.x] = EMPTY;
+        robot.x = newX;
+        robot.y = newY;
+        grid[newY][newX] = ROBOT;
+        return true;
+      } else if (grid[newY][newX] === PLAYER) {
+        addLog("Robot collided with player at (" + newX + "," + newY + ").");
+        if (gameRunning) playerCaught();
+        return true;
+      }
+      return false;
+    }
 
-      // ----- Update a Single Robot (modular guidance) -----
-      function updateRobot(robot) {
-        const dx = Math.sign(player.x - robot.x);
-        const dy = Math.sign(player.y - robot.y);
-        //addLog("Robot at (" + robot.x + "," + robot.y + ") sees player at (" + player.x + "," + player.y + ") and tries to move towards.");
-        
+    // ----- Update a Single Robot (modular guidance) -----
+    function updateRobot(robot) {
+      const dx = Math.sign(player.x - robot.x);
+      const dy = Math.sign(player.y - robot.y);
+
 		// Try to move the robot towards the player
 		let moved = false;
         if (Math.abs(player.x - robot.x) > Math.abs(player.y - robot.y)) {
@@ -600,51 +592,44 @@
         }
 		
 		// The robot cannot move towards the player and is moving randomly instead
-        if (!moved) {
-          const directions = [
-            { dx: 1, dy: 0 },
-            { dx: -1, dy: 0 },
-            { dx: 0, dy: 1 },
-            { dx: 0, dy: -1 }
-          ];
-          directions.sort(() => Math.random() - 0.5);
-          for (const dir of directions) {
-            if (tryMoveRobot(robot, dir.dx, dir.dy)) {
-              //addLog("Robot at (" + robot.x + "," + robot.y + ") could not move towards the player and moved randomly instead.");
-              break;
-            }
-          }
-        }
-		
-        if (robot.x === player.x && robot.y === player.y) {
-          if (gameRunning && !collisionLock) {
-            collisionLock = true;
-            playerCaught();
-            setTimeout(() => { collisionLock = false; }, 100);
-          }
+    if (!moved) {
+      const directions = [
+        { dx: 1, dy: 0 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 0, dy: -1 }
+      ];
+      directions.sort(() => Math.random() - 0.5);
+      for (const dir of directions) {
+        if (tryMoveRobot(robot, dir.dx, dir.dy)) {
+          //addLog("Robot at (" + robot.x + "," + robot.y + ") could not move towards the player and moved randomly instead.");
+          break;
         }
       }
+    }
+  
+      if (robot.x === player.x && robot.y === player.y) {
+        if (gameRunning && !collisionLock) {
+          collisionLock = true;
+          playerCaught();
+          setTimeout(() => { collisionLock = false; }, 100);
+        }
+      }
+    }
 
       // ----- Move All Robots -----
-		async function moveRobots() {
-		  if (!gameRunning) return;
+      function moveRobots() {
+        if (!gameRunning) return;
 
-		  for (const robot of robots) {
-			await updateRobotAI(robot);
-		  }
-		}
-
-		// Finally, make your game interval async:
-		gameInterval = setInterval(async () => {
-		  await moveRobots();
-		  render();
-		}, 800);	  
-
+        // Update each robot uniquely
+        for (const robot of robots) {
+          updateRobot(robot);
+        }
+      }
       // ----- PLAYER CAUGHT -----
       function playerCaught() {
         if (!gameRunning) return;
-        addLog("Player caught by robot!");
-        console.log("Player caught by robot!");
+        addLog("Player caught");
         lives--;
         updateDisplays();
         if (lives <= 0) {
@@ -656,8 +641,7 @@
 
       // ----- RESET POSITIONS -----
       function resetPositions() {
-        addLog("Resetting positions...");
-        console.log("Resetting positions...");
+        addLog("Resetting positions");
         grid[player.y][player.x] = EMPTY;
         for (const robot of robots) {
           grid[robot.y][robot.x] = EMPTY;
@@ -682,8 +666,7 @@
 
       // ----- LEVEL COMPLETE -----
       function levelComplete() {
-        addLog("Level complete!");
-        console.log("Level complete!");
+        addLog("Level complete");
         score += timeRemaining * 10;
         level++;
         updateDisplays();
@@ -700,8 +683,7 @@
 
       // ----- END GAME -----
       function endGame() {
-        addLog("Ending game...");
-        console.log("Ending game...");
+        addLog("Game over");
         clearInterval(gameInterval);
         clearInterval(timerInterval);
         if (score > highScore) {
@@ -717,8 +699,7 @@
 
       // ----- START GAME -----
       function startGame() {
-        console.log("Start button clicked. Starting game...");
-        // Hide overlays using working method.
+        // Hide overlays
         welcomeScreen.classList.add('hidden');
         gameOverScreen.classList.add('hidden');
 		
@@ -732,37 +713,22 @@
         
         initGame();
         
+        // Main game loop for robot movement
         gameInterval = setInterval(() => {
           moveRobots();
           render();
         }, 800);
-        // Timer is disabled for testing; to enable, uncomment:
-        // timerInterval = setInterval(updateTimer, 1000);
         
         gameRunning = true;
         collisionLock = false;
-        addLog("Game started.");
-        console.log("Game running:", gameRunning);
+        addLog("Game started");
       }
 
       // ----- RESTART GAME -----
       function restartGame() {
-        console.log("Restart button clicked.");
         gameOverScreen.classList.add('hidden');
         gameOverScreen.style.display = "none";
         startGame();
-      }
-
-      // ----- Modular Player Action (for future AI control) -----
-      function playerAct(direction) {
-        let result = false;
-        switch(direction) {
-          case "UP": result = movePlayer(0, -1); break;
-          case "DOWN": result = movePlayer(0, 1); break;
-          case "LEFT": result = movePlayer(-1, 0); break;
-          case "RIGHT": result = movePlayer(1, 0); break;
-        }
-        return result;
       }
 
       // ----- KEY LISTENER -----
@@ -806,18 +772,14 @@
 		cancelPushTimers();  // Stop all ice push attempts
 	  });
 
-      // ----- BUTTON LISTENERS -----
       startButton.addEventListener('click', () => {
-        console.log("'START GAME' button clicked");
         startGame();
       });
       restartButton.addEventListener('click', () => {
-        console.log("'PLAY AGAIN' button clicked");
         restartGame();
       });
 
-      addLog("Game ready. Click 'START GAME' to begin.");
-      console.log("Game ready. Click 'START GAME' to begin.");
+      addLog("Game ready");
     });
   </script>
 </body>
