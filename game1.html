@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Freeze Factory</title>
+  <style>
+    body {
+      background-color: #222;
+      color: #eee;
+      font-family: 'Courier New', monospace;
+      text-align: center;
+      margin: 0;
+      padding: 20px;
+    }
+    /* Layout: play area and log window side by side */
+    #game-container {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      margin: 20px auto;
+    }
+    #play-area {
+      position: relative;
+    }
+    #game-canvas {
+      background-color: black;
+      border: 2px solid #555;
+    }
+    /* Score panel positioned at top of play area */
+    #score-panel {
+      position: absolute;
+      top: -20px;
+      left: 0;
+      width: 100%;
+      display: flex;
+      justify-content: space-around;
+      font-size: 18px;
+    }
+    /* Scrolling log window on right side */
+    #log-window {
+      width: 200px;
+      height: 550px; /* same height as canvas */
+      background-color: #111;
+      color: #0f0;
+      font-family: 'Courier New', monospace;
+      font-size: 14px;
+      overflow-y: auto;
+      text-align: left;
+      padding: 5px;
+      margin-left: 10px;
+    }
+    /* Overlays */
+    #welcome-screen, #game-over {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.8);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: white;
+      font-size: 24px;
+      z-index: 1000;
+    }
+    /* Initially, welcome is visible; game-over is hidden */
+    #welcome-screen { display: flex; }
+    #game-over { display: none; }
+    .hidden { display: none; }
+    button {
+      margin-top: 20px;
+      padding: 10px 20px;
+      background-color: #5f5;
+      color: #000;
+      border: none;
+      border-radius: 5px;
+      font-family: 'Courier New', monospace;
+      font-size: 18px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #7f7;
+    }
+  </style>
+</head>
+<body>
+  <h1>The Freeze Factory</h1>
+  <div id="game-container">
+    <div id="play-area">
+      <canvas id="game-canvas" width="550" height="550"></canvas>
+      <div id="score-panel">
+        <div>Score: <span id="score">0</span></div>
+        <div>Level: <span id="level">1</span></div>
+        <div>Time: <span id="time">60</span></div>
+        <div>Lives: <span id="lives">3</span></div>
+      </div>
+    </div>
+    <div id="log-window"></div>
+  </div>
+  
+  <!-- Overlays -->
+  <div id="welcome-screen">
+    <h2>Welcome to The Freeze Factory!</h2>
+    <p>Use arrow keys or WASD to move</p>
+    <p>Push ice blocks to trap or crush robots</p>
+    <p>High Score: <span id="high-score">0</span></p>
+    <button id="start-button">START GAME</button>
+  </div>
+  <div id="game-over">
+    <h2>GAME OVER</h2>
+    <p>Your score: <span id="final-score">0</span></p>
+    <p>High Score: <span id="end-high-score">0</span></p>
+    <button id="restart-button">PLAY AGAIN</button>
+  </div>
+
+  <script type="module">
+ 
+  // WebLLM for operating LLMs in browser
+	import * as webllm from 'https://esm.run/@mlc-ai/web-llm';
+
+  // Create the MLCEngine instance
+	const engine = new webllm.MLCEngine();
+	const selectedModel = "Llama-3-8B-Instruct-q4f32_1-MLC-1k";
+
+	// Start loading immediately; we'll await it later
+	const loadModelPromise = engine.reload(selectedModel, {
+		temperature: 0.8,
+		top_p: 0.8
+	}).then(() => {
+		console.log('[LLM] Model loaded successfully');
+	}).catch((err) => {
+		console.error('[LLM] Failed to load model:', err);
+	});
+  
+  document.addEventListener('DOMContentLoaded', async function() {
+	  // Model loads in the background; game starts immediately with procedural AI
+	  console.log('Game initialized and ready to play');
+
+      // ----- GAME CONSTANTS -----
+      const TILE_SIZE = 25;
+      const GRID_WIDTH = 22;
+      const GRID_HEIGHT = 22;
+      const EMPTY = 0, WALL = 1, PLAYER = 2, ROBOT = 3, ICE = 4;
+      const playerIsAI = false;  // Set to true to have LLM control the player
+      
+      // Configuration: player at top-left; robots in three other corners; maze of ice blocks.
+      const ROBOT_COUNT = 1;
+      const ICE_COUNT = 100;
+      const FRICTION_DELAY = 150; // Delay before sliding begins
+      const PUSH_THRESHOLD = 300; // Time required to push before ice slides
+      let pushTimers = {}; // Track push timers per direction
+      const LLM_ENABLED = true; // Toggle LLM guidance
+      const PLAN_TIMEOUT = 10000; // Max time to wait for LLM response (ms)
+      const MOVES_PER_PLAN = 4; // Number of moves to request per plan
+      const DEBUG_MODE = 0; // Set to 1 for step-by-step LLM debugging (press 'q' to advance)
+      let debugWaitingForInput = DEBUG_MODE; // Flag to pause robot for debug
+      
+      // ----- GAME VARIABLES -----
+      let grid = [];
+      let player = { x: 0, y: 0 };
+      let robots = [];
+      let score = 0, highScore = 0, level = 1, lives = 3, timeRemaining = 60;
+      let gameInterval = null, timerInterval = null;
+      let gameRunning = false;
+      let collisionLock = false;
+      
+      // ----- DOM ELEMENTS -----
+      const canvas = document.getElementById('game-canvas');
+      const ctx = canvas.getContext('2d');
+      const scoreDisplay = document.getElementById('score');
+      const levelDisplay = document.getElementById('level');
+      const timeDisplay = document.getElementById('time');
+      const livesDisplay = document.getElementById('lives');
+      const finalScoreDisplay = document.getElementById('final-score');
+      const highScoreDisplay = document.getElementById('high-score');
+      const endHighScoreDisplay = document.getElementById('end-high-score');
+      const welcomeScreen = document.getElementById('welcome-screen');
+      const gameOverScreen = document.getElementById('game-over');
+      const startButton = document.getElementById('start-button');
+      const restartButton = document.getElementById('restart-button');
+      const logWindow = document.getElementById('log-window');
+
+      // ----- COLORS -----
+      const COLORS = {
+        empty: 'black',
+        wall: '#555',
+        player: '#5f5',
+        robot: '#f55',
+        ice: '#5ff'
+      };
+
+      // ----- Logging Function -----
+      function addLog(message) {
+        const p = document.createElement('p');
+        p.textContent = message;
+        logWindow.appendChild(p);
+        logWindow.scrollTop = logWindow.scrollHeight;
+      }
+	  
+      // ----- AI testing -----
+	  async function promptAI(promptText) {
+		  // ensure the model is ready
+		  await loadModelPromise;
+		  
+          try {
+			// generate a completion using WebLLM's chat API
+			addLog(`[Prompt] ${promptText}`);
+			
+			const messages = [
+				{ role: "user", content: promptText }
+			];
+			
+			const completion = await engine.chat.completions.create({
+				messages: messages,
+				max_tokens: 20,
+				temperature: 0.8,
+				top_p: 0.8
+			});
+			
+			const responseText = completion.choices[0].message.content.trim();
+			
+			// write it out to your log window
+			addLog(`[LLM] ${responseText}`);
+			return responseText;
+		  } catch (err) {
+			console.error("LLM call failed:", err);
+			addLog("[LLM] <error> " + err.message);
+			return null;
+		  }
+	  }
+	  
+	  
+      // ----- Robot LLM Guidance System -----
+	  
+	  // Extract a 5×5 local view around robot
+	  function extractLocalContext(robot) {
+	  	const R = 2;
+	  	let map = '';
+	  	for (let dy = -R; dy <= R; dy++) {
+	  	  for (let dx = -R; dx <= R; dx++) {
+	  	  	const x = robot.x + dx, y = robot.y + dy;
+	  	  	let c = 'W';
+	  	  	if (x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT) {
+	  	  	  const v = grid[y][x];
+	  	  	  c = v === EMPTY ? '.' : v === WALL ? 'W' : v === ICE ? 'I' : (v === PLAYER ? 'P' : v === ROBOT ? 'R' : '.');
+	  	  	}
+	  	  	map += c;
+	  	  }
+	  	  map += '\n';
+	  	}
+	  	return map;
+	  }
+
+	  // Build a prompt asking for a sequence of moves
+	  function buildMovePlanPrompt(robot) {
+	  	const localMap = extractLocalContext(robot);
+	  	const distToPlayer = Math.abs(robot.x - player.x) + Math.abs(robot.y - player.y);
+	  	return `Robot ${robot.id} at (${robot.x},${robot.y}). Player at (${player.x},${player.y}), distance=${distToPlayer}.\n`
+	  	  + `Local 5x5 map (P=player, R=robot, I=ice, W=wall, .=empty):\n${localMap}\n`
+	  	  + `Generate ${MOVES_PER_PLAN} moves. Return ONLY valid JSON: {"moves":["UP","LEFT",...]} No explanation.`;
+	  }
+
+	  // Generate a movement plan from LLM and queue it
+	  async function generateLLMMovePlan(robot) {
+	  	if (!LLM_ENABLED || !loadModelPromise) {
+	  	  robot.moveQueue = [];
+	  	  return;
+	  	}
+
+	  	try {
+	  	  const prompt = buildMovePlanPrompt(robot);
+	  	  
+	  	  if (DEBUG_MODE) {
+	  	  	addLog(`\n=== DEBUG: LLM PROMPT (R${robot.id}) ===`);
+	  	  	addLog(prompt);
+	  	  	addLog(`=== END PROMPT ===\n`);
+	  	  }
+	  	  addLog(`[R${robot.id}] Planning...`);
+	  	  
+	  	  // Wait for LLM response with timeout
+	  	  const response = await Promise.race([
+	  	  	engine.chat.completions.create({
+	  	  	  messages: [{ role: "user", content: prompt }],
+	  	  	  max_tokens: 50,
+	  	  	  temperature: 0.6
+	  	  	}),
+	  	  	new Promise((_, reject) => 
+	  	  	  setTimeout(() => reject(new Error('timeout')), PLAN_TIMEOUT)
+	  	  	)
+	  	  ]);
+
+	  	  const responseText = response.choices[0].message.content.trim();
+	  	  
+	  	  if (DEBUG_MODE) {
+	  	  	addLog(`\n=== DEBUG: LLM RESPONSE (R${robot.id}) ===`);
+	  	  	addLog(responseText);
+	  	  	addLog(`=== END RESPONSE ===\n`);
+	  	  }
+	  	  
+	  	  // Try to extract JSON from response
+	  	  let moves = [];
+	  	  try {
+	  	  	const jsonMatch = responseText.match(/\{[^}]*\}/);
+	  	  	if (DEBUG_MODE && jsonMatch) {
+	  	  	  addLog(`[R${robot.id}] JSON match: ${jsonMatch[0]}`);
+	  	  	}
+	  	  	if (jsonMatch) {
+	  	  	  const obj = JSON.parse(jsonMatch[0]);
+	  	  	  moves = obj.moves || obj.plan || [];
+	  	  	  if (DEBUG_MODE) {
+	  	  	  	addLog(`[R${robot.id}] Parsed moves: ${JSON.stringify(moves)}`);
+	  	  	  }
+	  	  	}
+	  	  } catch (parseErr) {
+	  	  	addLog(`[R${robot.id}] Parse failed: ${parseErr.message}`);
+	  	  }
+
+	  	  robot.moveQueue = Array.isArray(moves) ? moves.filter(m => ['UP', 'DOWN', 'LEFT', 'RIGHT'].includes(m)) : [];
+	  	  if (DEBUG_MODE) {
+	  	  	addLog(`[R${robot.id}] Final queue length: ${robot.moveQueue.length}`);
+	  	  	addLog(`[R${robot.id}] Queue: [${robot.moveQueue.join(', ')}]`);
+	  	  }
+	  	  if (robot.moveQueue.length > 0) {
+	  	  	addLog(`[R${robot.id}] Plan: ${robot.moveQueue.join('-')}`);
+	  	  }
+	  	  debugWaitingForInput = DEBUG_MODE; // Resume waiting for next 'q' press
+	  	} catch (err) {
+	  	  addLog(`[R${robot.id}] LLM error: ${err.message}`);
+	  	  robot.moveQueue = [];
+	  	  debugWaitingForInput = DEBUG_MODE; // Resume waiting for next 'q' press
+	  	}
+	  }
+
+	  // Procedural AI (fallback logic)
+	  function updateRobotProcedural(robot) {
+	  	const dx = Math.sign(player.x - robot.x);
+	  	const dy = Math.sign(player.y - robot.y);
+	  	let moved = false;
+	  	if (Math.abs(player.x - robot.x) > Math.abs(player.y - robot.y)) {
+	  	  moved = tryMoveRobot(robot, dx, 0) || tryMoveRobot(robot, 0, dy);
+	  	} else {
+	  	  moved = tryMoveRobot(robot, 0, dy) || tryMoveRobot(robot, dx, 0);
+	  	}
+
+	  	// If blocked, move randomly
+	  	if (!moved) {
+	  	  const directions = [
+	  	  	{ dx: 1, dy: 0 },
+	  	  	{ dx: -1, dy: 0 },
+	  	  	{ dx: 0, dy: 1 },
+	  	  	{ dx: 0, dy: -1 }
+	  	  ];
+	  	  directions.sort(() => Math.random() - 0.5);
+	  	  for (const dir of directions) {
+	  	  	if (tryMoveRobot(robot, dir.dx, dir.dy)) break;
+	  	  }
+	  	}
+	  }
+
+		
+      // ----- initGame() -----
+      // Sets up the game board: grid, walls, player, robots, and ice blocks.
+      function initGame() {
+        grid = Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(EMPTY));
+        // Build walls around edges.
+        for (let x = 0; x < GRID_WIDTH; x++) {
+          grid[0][x] = WALL;
+          grid[GRID_HEIGHT - 1][x] = WALL;
+        }
+        for (let y = 0; y < GRID_HEIGHT; y++) {
+          grid[y][0] = WALL;
+          grid[y][GRID_WIDTH - 1] = WALL;
+        }
+        // Place player in top-left (cell [1,1]).
+        player.x = 1;
+        player.y = 1;
+        grid[player.y][player.x] = PLAYER;
+        // Place robots in three other corners.
+        robots = [];
+        const corners = [
+          { x: GRID_WIDTH - 2, y: 1 },            // top-right
+          { x: 1, y: GRID_HEIGHT - 2 },           // bottom-left
+          { x: GRID_WIDTH - 2, y: GRID_HEIGHT - 2 } // bottom-right
+        ];
+        for (let i = 0; i < ROBOT_COUNT; i++) {
+          const pos = corners[i];
+          robots.push({ 
+            id: i, 
+            x: pos.x, 
+            y: pos.y,
+            moveQueue: [],
+            lastPlanTime: 0
+          });
+          grid[pos.y][pos.x] = ROBOT;
+        }
+        // Randomly place ice blocks (avoid edges).
+        let placedIce = 0;
+        while (placedIce < ICE_COUNT) {
+          const ix = Math.floor(Math.random() * (GRID_WIDTH - 2)) + 1;
+          const iy = Math.floor(Math.random() * (GRID_HEIGHT - 2)) + 1;
+          if (grid[iy][ix] === EMPTY) {
+            grid[iy][ix] = ICE;
+            placedIce++;
+          }
+        }
+        if (level === 1) score = 0;
+        timeRemaining = 60;
+        updateDisplays();
+        render();
+        addLog("Game initialized.");
+      }
+
+      // ----- Update HUD -----
+      function updateDisplays() {
+        scoreDisplay.textContent = score;
+        levelDisplay.textContent = level;
+        timeDisplay.textContent = timeRemaining;
+        livesDisplay.textContent = lives;
+        highScoreDisplay.textContent = highScore;
+        endHighScoreDisplay.textContent = highScore;
+      }
+
+      // ----- Render the Grid -----
+      function render() {
+        if (!grid || grid.length !== GRID_HEIGHT) {
+          console.log("Grid not ready for render.");
+          return;
+        }
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        for (let y = 0; y < GRID_HEIGHT; y++) {
+          for (let x = 0; x < GRID_WIDTH; x++) {
+            const cell = grid[y][x];
+            if (cell !== EMPTY) {
+              ctx.fillStyle = COLORS[
+                cell === WALL ? 'wall' :
+                cell === PLAYER ? 'player' :
+                cell === ROBOT ? 'robot' : 'ice'
+              ];
+              ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+              if (cell === PLAYER) {
+                ctx.fillStyle = 'black';
+                ctx.fillRect(x * TILE_SIZE + 7, y * TILE_SIZE + 8, 3, 3);
+                ctx.fillRect(x * TILE_SIZE + 15, y * TILE_SIZE + 8, 3, 3);
+                ctx.fillRect(x * TILE_SIZE + 7, y * TILE_SIZE + 16, 11, 2);
+              } else if (cell === ROBOT) {
+                ctx.fillStyle = 'white';
+                ctx.fillRect(x * TILE_SIZE + 6, y * TILE_SIZE + 7, 4, 4);
+                ctx.fillRect(x * TILE_SIZE + 15, y * TILE_SIZE + 7, 4, 4);
+                ctx.fillRect(x * TILE_SIZE + 8, y * TILE_SIZE + 16, 9, 2);
+              } else if (cell === ICE) {
+                ctx.fillStyle = 'white';
+                ctx.fillRect(x * TILE_SIZE + 5, y * TILE_SIZE + 5, 2, 2);
+                ctx.fillRect(x * TILE_SIZE + 15, y * TILE_SIZE + 8, 2, 2);
+                ctx.fillRect(x * TILE_SIZE + 10, y * TILE_SIZE + 15, 2, 2);
+              }
+            }
+          }
+        }
+      }
+	  
+	// ----- Compute Slide Path -----
+	// Computes the full path for an ice block pushed from (x,y) in direction (dx,dy).
+	// If the ice block encounters a wall or goes out-of-bounds, it stops.
+	// If it encounters a robot, it returns type "crush".
+	// If it encounters another ice block, it stops sliding (returns type "slide").
+	// Returns an object: { path: [ {x, y}, ... ], type: "slide" | "crush" }
+	function computeSlidePath(x, y, dx, dy) {
+	  let path = [];
+	  let curX = x, curY = y;
+	  while (true) {
+		let nextX = curX + dx, nextY = curY + dy;
+		// If next cell is out-of-bounds or a wall, end the slide.
+		if (nextX < 0 || nextX >= GRID_WIDTH || nextY < 0 || nextY >= GRID_HEIGHT) {
+			path.push({ x: curX, y: curY });
+			return { path: path, type: "slide" };		  
+		}
+		// If next cell is empty, add it to the path and continue.
+		if (grid[nextY][nextX] === EMPTY) {
+		  path.push({ x: nextX, y: nextY });
+		  curX = nextX;
+		  curY = nextY;
+		  continue;
+		}
+		// If next cell is a robot, add that cell and return a "crush" event.
+		if (grid[nextY][nextX] === ROBOT) {
+		  path.push({ x: nextX, y: nextY });
+		  return { path: path, type: "crush" };
+		}
+		// If next cell is another ice block, then stop sliding here.
+		if (grid[nextY][nextX] === ICE || grid[nextY][nextX] === WALL) {
+          if (path.length === 0)
+			return { path: path, type: "melt" };
+		  else
+			return { path: path, type: "slide" };
+		}
+		break;
+	  }
+	  return { path: path, type: "slide" };
+	}
+	  
+  // ----- Animate Slide -----
+  function animateSlide(path, slideResult, callback) {
+    let i = 0;
+    function step() {
+      if (i < path.length) {
+        let pos = path[i];
+        if (i > 0) {
+          let prev = path[i - 1];
+          if (grid[prev.y][prev.x] === ICE) grid[prev.y][prev.x] = EMPTY;
+        }
+        grid[pos.y][pos.x] = ICE;
+        render();
+        i++;
+        setTimeout(step, 50);
+      } else {
+        callback(slideResult);
+      }
+    }
+    step();
+  }
+
+	// ----- Slide Ice with Friction Delay -----
+	function slideIceDelayed(x, y, dx, dy) {
+	
+	  grid[y][x] = EMPTY;
+
+	  setTimeout(() => {
+		let result = computeSlidePath(x, y, dx, dy);
+				
+		// Start the slide animation; animateSlide() will clear the original cell on its first step.
+		animateSlide(result.path, result, function(finalResult) {
+		  if (finalResult.type === "slide") {
+			let finalPos = finalResult.path[finalResult.path.length - 1];
+			//addLog("Ice block slid to (" + finalPos.x + "," + finalPos.y + ").");
+			grid[finalPos.y][finalPos.x] = ICE;
+		  } else if (finalResult.type === "crush") {
+			let crushPos = finalResult.path[finalResult.path.length - 1];
+			addLog("Ice block crushed a robot at (" + crushPos.x + "," + crushPos.y + ").");
+			grid[crushPos.y][crushPos.x] = ICE;
+			score += 100;
+			updateDisplays();
+			scheduleRobotRevival(crushPos.x, crushPos.y);
+		  } else if (finalResult.type === "melt") {
+			addLog("Ice block melted away.");
+		  }
+		  render();
+		});
+	  }, FRICTION_DELAY);
+	  return computeSlidePath(x, y, dx, dy);
+	}
+
+    // ----- Modular Player Action -----
+    function playerAct(direction) {
+      let dx = 0, dy = 0;
+      switch(direction) {
+        case "UP": dy = -1; break;
+        case "DOWN": dy = 1; break;
+        case "LEFT": dx = -1; break;
+        case "RIGHT": dx = 1; break;
+        default: return false;
+      }
+      return movePlayer(dx, dy);
+    }
+
+    // ----- PLAYER MOVEMENT -----
+  function movePlayer(dx, dy) {
+    const newX = player.x + dx;
+    const newY = player.y + dy;
+
+    if (newX < 0 || newX >= GRID_WIDTH || newY < 0 || newY >= GRID_HEIGHT) {
+      return false;
+    }
+
+    if (grid[newY][newX] === EMPTY) {
+      grid[player.y][player.x] = EMPTY;
+      player.x = newX;
+      player.y = newY;
+      grid[player.y][player.x] = PLAYER;
+      return true;
+    } else if (grid[newY][newX] === ICE) {
+      // Unique key for push tracking
+      let pushKey = `${newX},${newY},${dx},${dy}`;
+
+      // If this is a new push, start a timer
+      if (!pushTimers[pushKey]) {
+        pushTimers[pushKey] = setTimeout(() => {
+          slideIceDelayed(newX, newY, dx, dy);
+          delete pushTimers[pushKey];  // Clear after execution
+        }, PUSH_THRESHOLD);
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  // Cancel push timers if the player moves away or stops pushing
+  function cancelPushTimers() {
+    for (let key in pushTimers) {
+      clearTimeout(pushTimers[key]);
+    }
+    pushTimers = {};
+  }
+	  	  
+    // ----- ROBOT MOVEMENT -----
+    function tryMoveRobot(robot, dx, dy) {
+      const newX = robot.x + dx;
+      const newY = robot.y + dy;
+      if (newX < 0 || newX >= GRID_WIDTH || newY < 0 || newY >= GRID_HEIGHT) {
+        return false;
+      }
+      if (grid[newY][newX] === EMPTY) {
+        grid[robot.y][robot.x] = EMPTY;
+        robot.x = newX;
+        robot.y = newY;
+        grid[newY][newX] = ROBOT;
+        return true;
+      } else if (grid[newY][newX] === PLAYER) {
+        addLog("Robot collided with player at (" + newX + "," + newY + ").");
+        if (gameRunning) playerCaught();
+        return true;
+      }
+      return false;
+    }
+
+    // ----- Update a Single Robot (LLM-guided with procedural fallback) -----
+    function updateRobot(robot) {
+      // In DEBUG_MODE, pause robot until 'q' pressed
+      if (DEBUG_MODE && debugWaitingForInput) {
+        return; // Robot stands still
+      }
+
+      // Consume from moveQueue if available
+      if (robot.moveQueue && robot.moveQueue.length > 0) {
+        const move = robot.moveQueue.shift();
+        const moveMap = {
+          'UP': { dx: 0, dy: -1 },
+          'DOWN': { dx: 0, dy: 1 },
+          'LEFT': { dx: -1, dy: 0 },
+          'RIGHT': { dx: 1, dy: 0 }
+        };
+        const direction = moveMap[move];
+        if (direction) {
+          const moved = tryMoveRobot(robot, direction.dx, direction.dy);
+          if (!moved) {
+            // Plan blocked; clear queue and fallback to procedural
+            robot.moveQueue = [];
+          }
+        }
+      } else {
+        // Queue is empty; check if we should request a new plan from LLM
+        const now = Date.now();
+        if (LLM_ENABLED && (now - robot.lastPlanTime) > PLAN_TIMEOUT + 500) {
+          robot.lastPlanTime = now;
+          generateLLMMovePlan(robot); // Fire and forget; will populate queue asynchronously
+        }
+        
+        // Fall back to procedural logic while waiting for LLM
+        updateRobotProcedural(robot);
+      }
+
+      // Check collision
+      if (robot.x === player.x && robot.y === player.y) {
+        if (gameRunning && !collisionLock) {
+          collisionLock = true;
+          playerCaught();
+          setTimeout(() => { collisionLock = false; }, 100);
+        }
+      }
+    }
+
+      // ----- Move All Robots -----
+      function moveRobots() {
+        if (!gameRunning) return;
+
+        // Update each robot uniquely
+        for (const robot of robots) {
+          updateRobot(robot);
+        }
+      }
+      // ----- PLAYER CAUGHT -----
+      function playerCaught() {
+        if (!gameRunning) return;
+        addLog("Player caught");
+        lives--;
+        updateDisplays();
+        if (lives <= 0) {
+          endGame();
+        } else {
+          resetPositions();
+        }
+      }
+
+      // ----- RESET POSITIONS -----
+      function resetPositions() {
+        addLog("Resetting positions");
+        grid[player.y][player.x] = EMPTY;
+        for (const robot of robots) {
+          grid[robot.y][robot.x] = EMPTY;
+        }
+        // Place player in top-left.
+        player.x = 1;
+        player.y = 1;
+        grid[player.y][player.x] = PLAYER;
+        robots = [];
+        const corners = [
+          { x: GRID_WIDTH - 2, y: 1 },
+          { x: 1, y: GRID_HEIGHT - 2 },
+          { x: GRID_WIDTH - 2, y: GRID_HEIGHT - 2 }
+        ];
+        for (let i = 0; i < ROBOT_COUNT; i++) {
+          const pos = corners[i];
+          robots.push({ 
+            id: i, 
+            x: pos.x, 
+            y: pos.y,
+            moveQueue: [],
+            lastPlanTime: 0
+          });
+          grid[pos.y][pos.x] = ROBOT;
+        }
+        render();
+      }
+
+      // ----- LEVEL COMPLETE -----
+      function levelComplete() {
+        addLog("Level complete");
+        score += timeRemaining * 10;
+        level++;
+        updateDisplays();
+        initGame();
+      }
+
+      // ----- (Disabled) TIMER -----
+      function updateTimer() {
+        timeDisplay.textContent = timeRemaining;
+        if (timeRemaining <= 0) {
+          playerCaught();
+        }
+      }
+
+      // ----- END GAME -----
+      function endGame() {
+        addLog("Game over");
+        clearInterval(gameInterval);
+        clearInterval(timerInterval);
+        if (score > highScore) {
+          highScore = score;
+          highScoreDisplay.textContent = highScore;
+          endHighScoreDisplay.textContent = highScore;
+        }
+        finalScoreDisplay.textContent = score;
+        gameOverScreen.classList.remove('hidden');
+        gameOverScreen.style.display = "flex";
+        gameRunning = false;
+      }
+
+      // ----- START GAME -----
+      function startGame() {
+        // Hide overlays
+        welcomeScreen.classList.add('hidden');
+        gameOverScreen.classList.add('hidden');
+		
+        welcomeScreen.style.display = "none";
+        gameOverScreen.style.display = "none";
+        
+        score = 0;
+        level = 1;
+        lives = 3;
+        timeRemaining = 60;
+        
+        initGame();
+        
+        // Main game loop for robot movement
+        gameInterval = setInterval(() => {
+          moveRobots();
+          render();
+        }, 800);
+        
+        gameRunning = true;
+        collisionLock = false;
+        addLog("Game started");
+      }
+
+      // ----- RESTART GAME -----
+      function restartGame() {
+        gameOverScreen.classList.add('hidden');
+        gameOverScreen.style.display = "none";
+        startGame();
+      }
+
+      // ----- KEY LISTENER -----
+      document.addEventListener('keydown', (e) => {
+        // Handle DEBUG MODE step-through
+        if (DEBUG_MODE && e.key === 'q') {
+          e.preventDefault();
+          if (debugWaitingForInput) {
+            debugWaitingForInput = false;
+            addLog(`\n[DEBUG] 'q' pressed - triggering LLM plan request...`);
+            if (robots && robots.length > 0) {
+              generateLLMMovePlan(robots[0]);
+            }
+          }
+          return;
+        }
+
+        if (!gameRunning) return;
+        if (playerIsAI) return;
+        let action = null;
+        switch(e.key) {
+          case 'ArrowUp':
+          case 'w':
+          case 'W':
+            action = "UP";
+            break;
+          case 'ArrowDown':
+          case 's':
+          case 'S':
+            action = "DOWN";
+            break;
+          case 'ArrowLeft':
+          case 'a':
+          case 'A':
+            action = "LEFT";
+            break;
+          case 'ArrowRight':
+          case 'd':
+          case 'D':
+            action = "RIGHT";
+            break;
+        }
+        if (action) {
+          if (playerAct(action)) {
+            //addLog("Player moved " + action + " to (" + player.x + "," + player.y + ").");
+            //console.log("Player moved to:", player);
+            render();
+          }
+        }
+      });
+
+  	  // Listen for key releases to cancel ice pushing if the player stops pressing
+	  document.addEventListener('keyup', (e) => {
+		cancelPushTimers();  // Stop all ice push attempts
+	  });
+
+      startButton.addEventListener('click', () => {
+        startGame();
+      });
+      restartButton.addEventListener('click', () => {
+        restartGame();
+      });
+
+      addLog("Game ready");
+      
+      if (DEBUG_MODE) {
+        addLog("\n= DEBUG MODE ENABLED =");
+        addLog("Robot will pause at start. Press 'q' to:");
+        addLog("  1. Trigger LLM planning");
+        addLog("  2. See full prompt/response in log");
+        addLog("  3. Show parsed moves");
+        addLog("Robot resumes after each 'q' press.");
+        addLog("Press 'q' again when queue empties for next plan.");
+        addLog("=======================\n");
+      }
+    });
+  </script>
+</body>
+</html>
